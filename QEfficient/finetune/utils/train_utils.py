@@ -115,6 +115,7 @@ def train(
 
         # enable profile for qaic
         qaic_profile.start_profiling(device, 1) if train_config.use_profiler else None
+
         for step, batch in enumerate(train_dataloader):
             total_train_steps += 1
             #  stop when the maximum number of training steps is reached
@@ -146,7 +147,7 @@ def train(
                     loss = model(**batch).loss  # Forward call
 
             total_loss += loss.detach().float()
-            # Accumalate graidents
+            # Accumalate gradients
             loss = loss / train_config.gradient_accumulation_steps
 
             if train_config.enable_ddp:
@@ -222,7 +223,6 @@ def train(
                 dist.all_reduce(eval_epoch_loss, op=dist.ReduceOp.SUM)
                 if local_rank == 0:
                     tensorboard_updates.add_scalars("loss", {"eval": eval_epoch_loss}, total_train_steps)
-
             else:
                 eval_ppl, eval_epoch_loss, temp_val_loss, temp_step_perplexity = evaluation(
                     model, train_config, eval_dataloader, local_rank, tokenizer, device
