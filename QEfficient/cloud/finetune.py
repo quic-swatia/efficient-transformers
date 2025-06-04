@@ -16,7 +16,9 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
 import torch.utils.data
-from peft import PeftModel, get_peft_model
+from accelerate import Accelerator, FullyShardedDataParallelPlugin
+from peft import PeftModel, get_peft_model, prepare_model_for_kbit_training
+from torch.distributed.fsdp.fully_sharded_data_parallel import FullOptimStateDictConfig, FullStateDictConfig
 from torch.optim.lr_scheduler import StepLR
 from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
@@ -110,6 +112,7 @@ def load_model_and_tokenizer(
         - Sets pad_token_id to eos_token_id if not defined in the tokenizer.
     """
     pretrained_model_path = login_and_download_hf_lm(train_config.model_name)
+
     if train_config.task_type == "seq_classification":
         model = AutoModelForSequenceClassification.from_pretrained(
             pretrained_model_path,
@@ -117,7 +120,6 @@ def load_model_and_tokenizer(
             attn_implementation="sdpa",
             torch_dtype=torch.float16,
         )
-
         if not hasattr(model, "base_model_prefix"):
             raise RuntimeError("Given huggingface model does not have 'base_model_prefix' attribute.")
 
@@ -194,6 +196,7 @@ def apply_peft(
     # Generate the peft config and start fine-tuning from original model
     else:
         peft_config = generate_peft_config(train_config, peft_config_file, **kwargs)
+        model = prepare_model_for_kbit_training(model)
         model = get_peft_model(model, peft_config)
     model.print_trainable_parameters()
 
@@ -316,6 +319,13 @@ def main(peft_config_file: str = None, **kwargs) -> None:
                 --model_name "meta-llama/Llama-3.2-1B" \\
                 --lr 5e-4
     """
+    fsdp_plugin = FullyShardedDataParallelPlugin(
+        state_dict_config=FullStateDictConfig(offload_to_cpu=False, rank0_only=False),
+        optim_state_dict_config=FullOptimStateDictConfig(offload_to_cpu=False, rank0_only=False),
+        use_orig_params=True,
+        cpu_ram_efficient_loading=True,
+    )
+    accelerator = Accelerator(fsdp_plugin=fsdp_plugin)  #    fsdp_plugin_config=None)
     train_config = TrainConfig()
     update_config(train_config, **kwargs)
     dataset_config = generate_dataset_config(train_config.dataset)
@@ -333,12 +343,17 @@ def main(peft_config_file: str = None, **kwargs) -> None:
         f"{model.config.max_position_embeddings}"
     )
 
-    model.to(train_config.device)
+    # model.to(train_config.device)
+
     optimizer = optim.AdamW(model.parameters(), lr=train_config.lr, weight_decay=train_config.weight_decay)
     scheduler = StepLR(optimizer, step_size=1, gamma=train_config.gamma)
     if train_config.enable_ddp:
         model = nn.parallel.DistributedDataParallel(model, device_ids=[dist.get_rank()])
+
+    model, optimizer, train_dataloader, scheduler = accelerator.prepare(model, optimizer, train_dataloader, scheduler)
+
     results = train(
+        accelerator,
         model,
         tokenizer,
         train_dataloader,

@@ -33,6 +33,7 @@ from torch.amp import GradScaler
 
 
 def train(
+    accelerator,
     model,
     tokenizer,
     train_dataloader,
@@ -171,11 +172,13 @@ def train(
             if train_config.max_train_step > 0 and total_train_steps > train_config.max_train_step:
                 max_steps_reached = True
                 break
-            batch = {k: v.to(device) for k, v in batch.items()}  # move the batch elements to qaic device
-
+            # batch = {k: v.to(device) for k, v in batch.items()}  # move the batch elements to qaic device
+            # checking this
             with (
                 torch.autocast(device_type=device, dtype=torch.float16) if train_config.use_autocast else nullcontext()
             ):
+                # with accelerator.autocast(): #worked with it
+
                 # an additional condition can be put here to avoid opByOpVerifier getting triggered for each step
                 if train_config.opByOpVerifier:
                     with qaic_debug.OpByOpVerifierMode(
@@ -235,7 +238,7 @@ def train(
                 train_step_metric.append(step_metric_val)
 
             if train_config.grad_scaler:
-                scaler.scale(loss).backward()  # backward pass
+                accelerator.backward(scaler.scale(loss))  # backward pass
             else:
                 loss.backward()  # backward pass
 
