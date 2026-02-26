@@ -10,7 +10,6 @@ Main entry point for fine-tuning LLMs using the experimental finetune framework.
 """
 
 import os
-import torch
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -24,10 +23,9 @@ from QEfficient.finetune.experimental.core.logger import Logger
 from QEfficient.finetune.experimental.core.model import HFModel  # noqa: F401
 from QEfficient.finetune.experimental.core.optimizer import prepare_optimizer
 from QEfficient.finetune.experimental.core.trainer import sft_trainer  # noqa: F401
+from QEfficient.finetune.experimental.core.utils.device_map_utils import get_device_map, validate_pp_config
 from QEfficient.finetune.experimental.core.utils.peft_utils import convert_peft_config_to_lora_config
 from QEfficient.finetune.experimental.core.utils.training_config_utils import prepare_training_config
-from QEfficient.finetune.experimental.core.utils.device_map_utils import get_device_map, validate_pp_config
-from QEfficient.finetune.experimental.core.utils.dist_utils import get_local_rank
 
 logger = Logger(__name__)
 
