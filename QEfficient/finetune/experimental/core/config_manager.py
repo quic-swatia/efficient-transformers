@@ -29,7 +29,7 @@ class OptimizerConfig:
     """Configuration for optimizers."""
 
     optimizer_name: str = field(
-        default="adamw",
+        default="AdamW",
         metadata={"help": "The name of the optimizer to use."},
     )
     lr: float = field(
@@ -170,6 +170,7 @@ class DatasetConfig:
     )
     config_name: str = field(
         default="default",
+        # default=None
         metadata={"help": "Name of the hf configuration file."},
     )
     json_file_path: str = field(default=None, metadata={"help": "Path to a JSON file containing data."})
@@ -454,6 +455,14 @@ class TrainingConfig:
     completion_only_loss: Optional[bool] = field(
         default=False,
         metadata={"help": "Whether to compute loss only on completion tokens."},
+    )
+    enable_pp: bool = field(
+        default=False,
+        metadata={"help": "Enable pipeline parallelism for training."},
+    )
+    num_pp_stages: int = field(
+        default=1,
+        metadata={"help": "Number of stages for pipeline parallelism (must be > 1 when enable_pp=True)."},
     )
 
 
