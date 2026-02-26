@@ -23,7 +23,7 @@ from QEfficient.finetune.experimental.core.logger import Logger
 from QEfficient.finetune.experimental.core.model import HFModel  # noqa: F401
 from QEfficient.finetune.experimental.core.optimizer import prepare_optimizer
 from QEfficient.finetune.experimental.core.trainer import sft_trainer  # noqa: F401
-from QEfficient.finetune.experimental.core.utils.device_map_utils import get_device_map, validate_pp_config
+from QEfficient.finetune.experimental.core.utils.device_map_utils import get_device_map
 from QEfficient.finetune.experimental.core.utils.peft_utils import convert_peft_config_to_lora_config
 from QEfficient.finetune.experimental.core.utils.training_config_utils import prepare_training_config
 
@@ -55,38 +55,12 @@ class FineTuningPipeline:
         self.config = self.config_manager.config
         self.output_dir = Path(self.config.training["output_dir"])
         self._setup_environment()
-        self._validate_pp_config()
 
     def _setup_environment(self) -> None:
         """Set up environment variables for output directories."""
         os.environ["OUTPUT_DIR"] = str(self.output_dir)
         os.environ["TRACKIO_DIR"] = str(self.output_dir / "trackio_logs")
         os.environ["TENSORBOARD_LOGGING_DIR"] = str(self.output_dir)
-
-    def _validate_pp_config(self) -> None:
-        """
-        Validate pipeline parallelism configuration if PP is enabled.
-
-        This ensures that:
-        1. num_pp_stages > 1 when PP is enabled
-        """
-        training_config = self.config.training
-        enable_pp = training_config.get("enable_pp", False)
-
-        if not enable_pp:
-            return
-
-        num_pp_stages = training_config.get("num_pp_stages", 1)
-        device = training_config.get("device", "qaic")
-
-        # Validate PP configuration
-        validate_pp_config(
-            enable_pp=enable_pp,
-            num_pp_stages=num_pp_stages,
-            device=device,
-        )
-
-        logger.log_rank_zero(f"Pipeline Parallelism enabled with {num_pp_stages} stages")
 
     def _create_datasets(self) -> Tuple[Any, Any]:
         """
@@ -140,21 +114,19 @@ class FineTuningPipeline:
 
         # Get training config for PP settings
         training_config = self.config.training
-        enable_pp = training_config.get("enable_pp", False)
-        num_pp_stages = training_config.get("num_pp_stages", 1)
+        pp_degree = training_config.get("pp_degree", 1)
         device = training_config.get("device", "qaic")
 
-        # Generate device_map for pipeline parallelism if enabled
-        if enable_pp:
+        # Generate device_map for pipeline parallelism if pp_degree > 1
+        if pp_degree > 1:
             device_map = get_device_map(
                 model_name=model_name,
                 device=device,
-                enable_pp=enable_pp,
-                num_pp_stages=num_pp_stages,
+                pp_degree=pp_degree,
             )
-            # Override device_map in model_config if PP is enabled
+            # Pass device_map via model_config kwargs for model loading
             model_config["device_map"] = device_map
-            logger.log_rank_zero(f"Pipeline Parallelism enabled: Using device_map for {num_pp_stages} stages")
+            logger.log_rank_zero(f"Pipeline Parallelism enabled: Using device_map for {pp_degree} stages")
 
         # Filter out PEFT-related fields, these shouldn't be passed to model creation
         excluded_keys = {"use_peft", "peft_config"}
@@ -240,8 +212,7 @@ class FineTuningPipeline:
         training_config.pop("deepspeed_config", None)
         training_config.pop("torch_dtype", None)
         # Remove PP-specific fields as they're handled via device_map in model loading
-        training_config.pop("enable_pp", None)
-        training_config.pop("num_pp_stages", None)
+        training_config.pop("pp_degree", None)
 
         # Create trainer arguments instance
         args = args_cls(**training_config)

@@ -22,8 +22,7 @@ from QEfficient.utils._utils import get_num_layers_from_config
 def get_device_map(
     model_name: str,
     device: str,
-    enable_pp: bool = False,
-    num_pp_stages: int = 1,
+    pp_degree: int = 1,
 ) -> Optional[Dict[str, int]]:
     """
     Returns device map for the given model based on PP and DDP configuration.
@@ -31,33 +30,37 @@ def get_device_map(
     Args:
         model_name: Name of the model to load configuration from.
         device: Device type (e.g., 'cuda', 'qaic').
-        enable_pp: Whether pipeline parallelism is enabled.
-        num_pp_stages: Number of pipeline stages.
+        pp_degree: Pipeline parallelism degree (number of pipeline stages). > 1 enables PP.
     Returns:
         Dict: A dictionary mapping layer names to device IDs, or None if no PP.
     """
+    if pp_degree <= 1:
+        return None
+
     torch_device = torch.device(device)
     num_available_devices = getattr(torch, torch_device.type).device_count()
 
-    if enable_pp:
-        if num_pp_stages < num_available_devices:
-            device_map = custom_device_map(model_name, device, num_pp_stages)
-        elif num_pp_stages == num_available_devices:
-            device_map = "auto"
-    else:
-        device_map = None
+    if pp_degree > num_available_devices:
+        raise ValueError(
+            f"pp_degree ({pp_degree}) cannot exceed the number of available {device} devices "
+            f"({num_available_devices}). Reduce pp_degree or use a node with more devices."
+        )
+    elif pp_degree == num_available_devices:
+        device_map = "auto"
+    else:  # pp_degree < num_available_devices
+        device_map = custom_device_map(model_name, device, pp_degree)
 
     return device_map
 
 
-def custom_device_map(model_name: str, device: str, num_pp_stages: int) -> Dict[str, int]:
+def custom_device_map(model_name: str, device: str, pp_degree: int) -> Dict[str, int]:
     """
     Returns custom device map for model layers based on number of pipeline stages and process rank.
 
     Args:
         model_name: Name of the model to load configuration from.
         device: Device type (e.g., 'cuda', 'qaic').
-        num_pp_stages: Number of pipeline stages.
+        pp_degree: Pipeline parallelism degree (number of pipeline stages).
 
     Returns:
         Dict: A dictionary mapping layer names to device IDs.
@@ -65,6 +68,8 @@ def custom_device_map(model_name: str, device: str, num_pp_stages: int) -> Dict[
     Notes:
         - This device map structure is verified for llama models primarily.
         - For other architectures, you may need to adjust the layer naming conventions.
+        - Layers are distributed as evenly as possible: the first (num_layers % pp_degree)
+          stages receive one extra layer each.
 
     Example:
         Example config for PP + DDP is provided below as it works for only PP as well.
@@ -98,8 +103,15 @@ def custom_device_map(model_name: str, device: str, num_pp_stages: int) -> Dict[
     model_config = AutoConfig.from_pretrained(model_name)
     num_layers = get_num_layers_from_config(model_config)
     local_rank = get_local_rank()
-    first_device = local_rank * num_pp_stages
-    last_device = local_rank * num_pp_stages + (num_pp_stages - 1)
+
+    if num_layers < pp_degree:
+        raise ValueError(
+            f"Number of model layers ({num_layers}) must be >= pp_degree ({pp_degree}). "
+            f"Cannot split {num_layers} layers across {pp_degree} pipeline stages."
+        )
+
+    first_device = local_rank * pp_degree
+    last_device = local_rank * pp_degree + (pp_degree - 1)
 
     # Handle tied embeddings
     if model_config.tie_word_embeddings:
@@ -114,23 +126,23 @@ def custom_device_map(model_name: str, device: str, num_pp_stages: int) -> Dict[
         "model.rotary_emb": last_device,
     }
 
-    # Calculate layers per stage
-    n_layer_per_stage = np.ceil(num_layers / num_pp_stages)
+    # Distribute layers as evenly as possible across stages.
+    # The first (num_layers % pp_degree) stages get one extra layer each.
+    base_layers, remainder = divmod(num_layers, pp_degree)
+    layers_per_stage = np.array([base_layers + (1 if i < remainder else 0) for i in range(pp_degree)])
 
-    # Create device mapping for each stage
-    pp_stage_ids = np.arange(num_pp_stages)
-    pp_device_map = np.repeat(pp_stage_ids, n_layer_per_stage)
+    # Create device assignment per layer
+    pp_device_map = np.repeat(np.arange(pp_degree), layers_per_stage)
 
     # Assign each layer to a device
     for i in range(num_layers):
-        device_map[f"model.layers.{i}"] = int(pp_device_map[i] + local_rank * num_pp_stages)
+        device_map[f"model.layers.{i}"] = int(pp_device_map[i] + local_rank * pp_degree)
 
     return device_map
 
 
 def validate_pp_config(
-    enable_pp: bool,
-    num_pp_stages: int,
+    pp_degree: int,
     device: str,
     local_world_size: int = 1,
 ) -> None:
@@ -138,25 +150,20 @@ def validate_pp_config(
     Validate pipeline parallelism configuration.
 
     Args:
-        enable_pp: Whether pipeline parallelism is enabled.
-        num_pp_stages: Number of pipeline stages.
+        pp_degree: Pipeline parallelism degree (number of pipeline stages). Must be > 1 to enable PP.
         device: Device type (e.g., 'cuda', 'qaic').
         local_world_size: Number of processes per node for DDP.
 
     Raises:
         AssertionError: If configuration is invalid.
     """
-    if enable_pp:
-        assert num_pp_stages > 1, (
-            f"For pipeline parallelism, num_pp_stages should be greater than 1. Got {num_pp_stages}"
-        )
-
+    if pp_degree > 1:
         # Validate device availability
         torch_device = torch.device(device)
         num_available_devices = getattr(torch, torch_device.type).device_count()
 
-        assert local_world_size * num_pp_stages <= num_available_devices, (
-            f"Number of devices required per node (LOCAL_WORLD_SIZE * num_pp_stages = "
-            f"{local_world_size} * {num_pp_stages} = {local_world_size * num_pp_stages}) "
+        assert local_world_size * pp_degree <= num_available_devices, (
+            f"Number of devices required per node (LOCAL_WORLD_SIZE * pp_degree = "
+            f"{local_world_size} * {pp_degree} = {local_world_size * pp_degree}) "
             f"should be <= locally available devices ({num_available_devices})."
         )

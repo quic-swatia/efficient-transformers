@@ -90,12 +90,10 @@ class HFModel(BaseModel):
         auto_class_name: str = "AutoModelForCausalLM",
         *,
         tokenizer_name: Optional[str] = None,
-        device_map: Optional[Any] = None,
         **model_kwargs: Any,
     ) -> None:
         super().__init__(model_name, **model_kwargs)
         self.tokenizer_name = tokenizer_name or model_name
-        self.device_map = device_map
         self.auto_class: Type = self._resolve_auto_class(auto_class_name)
 
     @staticmethod
@@ -121,9 +119,6 @@ class HFModel(BaseModel):
         """Hook for subclasses to tweak HF `.from_pretrained` kwargs."""
 
         extra = dict(self.model_kwargs)
-        # Add device_map if provided
-        if self.device_map is not None:
-            extra["device_map"] = self.device_map
         # extra["quantization_config"] = self._build_quant_config()
         return extra
 

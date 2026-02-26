@@ -170,7 +170,6 @@ class DatasetConfig:
     )
     config_name: str = field(
         default="default",
-        # default=None
         metadata={"help": "Name of the hf configuration file."},
     )
     json_file_path: str = field(default=None, metadata={"help": "Path to a JSON file containing data."})
@@ -456,13 +455,9 @@ class TrainingConfig:
         default=False,
         metadata={"help": "Whether to compute loss only on completion tokens."},
     )
-    enable_pp: bool = field(
-        default=False,
-        metadata={"help": "Enable pipeline parallelism for training."},
-    )
-    num_pp_stages: int = field(
+    pp_degree: int = field(
         default=1,
-        metadata={"help": "Number of stages for pipeline parallelism (must be > 1 when enable_pp=True)."},
+        metadata={"help": "Pipeline parallelism degree (number of pipeline stages). Set > 1 to enable PP."},
     )
 
 
@@ -752,6 +747,14 @@ class ConfigManager:
         # Logging / saving configs
         self._push(errors, training.get("logging_steps", 0) < 0, "training.logging_steps must be >= 0.")
         self._push(errors, training.get("save_total_limit", 0) < 0, "training.save_total_limit must be >= 0.")
+
+        # Pipeline Parallelism (PP) config
+        pp_degree = training.get("pp_degree", 1)
+        self._push(
+            errors,
+            not isinstance(pp_degree, int) or pp_degree < 1,
+            "training.pp_degree must be a positive integer (default 1 = no PP; > 1 enables PP).",
+        )
 
         # DDP config
         ddp = training.get("ddp_config", {})
