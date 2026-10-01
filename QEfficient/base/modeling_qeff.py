@@ -1128,6 +1128,9 @@ class QEFFBaseModel(ABC):
                 if value:
                     command.append(option)
                 continue
+            if isinstance(value, (list, tuple)):
+                command.extend(f"{option}={item}" for item in value)
+                continue
             command.append(f"{option}={value}")
 
         # Final custom-IO normalization against ONNX I/O names.

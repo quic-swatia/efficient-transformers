@@ -1,0 +1,108 @@
+{
+  "description": "Default configuration for Ideogram4 pipeline",
+  "modules": {
+    "text_encoder": {
+      "specializations": {
+        "batch_size": 1,
+        "seq_len": 2048
+      },
+      "compilation": {
+        "onnx_path": null,
+        "compile_dir": null,
+        "mdp_ts_num_devices": 4,
+        "mxfp6_matmul": true,
+        "convert_to_fp16": true,
+        "aic_num_cores": 16,
+        "v": true
+      },
+      "execute": {
+        "device_ids": null,
+        "qpc_path": null
+      }
+    },
+    "transformer": {
+      "specializations": {
+        "batch_size": 1,
+        "seq_len": 6144
+      },
+      "compilation": {
+        "onnx_path": null,
+        "compile_dir": null,
+        "mdp_ts_num_devices": 8,
+        "mxfp6_matmul": true,
+        "convert_to_fp16": true,
+        "aic_num_cores": 16,
+        "v": true
+      },
+      "execute": {
+        "device_ids": null,
+        "qpc_path": null
+      }
+    },
+    "unconditional_transformer": {
+      "specializations": {
+        "batch_size": 1,
+        "seq_len": 4096
+      },
+      "compilation": {
+        "onnx_path": null,
+        "compile_dir": null,
+        "mdp_ts_num_devices": 8,
+        "mxfp6_matmul": true,
+        "convert_to_fp16": true,
+        "aic_num_cores": 16,
+        "v": true
+      },
+      "execute": {
+        "device_ids": null,
+        "qpc_path": null
+      }
+    },
+    "vae_decoder": {
+      "specializations": {
+        "batch_size": 1,
+        "latent_height": 128,
+        "latent_width": 128
+      },
+      "compilation": {
+        "onnx_path": null,
+        "compile_dir": null,
+        "mdp_ts_num_devices": 1,
+        "mxfp6_matmul": false,
+        "convert_to_fp16": true,
+        "aic_num_cores": 16,
+        "aic-enable-depth-first": true,
+        "v": true
+      },
+      "execute": {
+        "device_ids": null,
+        "qpc_path": null
+      }
+    },
+    "prompt_enhancer_head": {
+      "specializations": [
+        {
+          "batch_size": 1,
+          "seq_len": 1
+        },
+        {
+          "batch_size": 1,
+          "seq_len": 2048
+        }
+      ],
+      "compilation": {
+        "onnx_path": null,
+        "compile_dir": null,
+        "mdp_ts_num_devices": 1,
+        "mxfp6_matmul": false,
+        "convert_to_fp16": true,
+        "aic_num_cores": 16,
+        "v": true
+      },
+      "execute": {
+        "device_ids": null,
+        "qpc_path": null
+      }
+    }
+  }
+}

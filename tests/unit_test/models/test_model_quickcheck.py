@@ -2301,6 +2301,88 @@ def test_qwen3_5_moe_gated_norm_preserves_float16():
     assert out.dtype == torch.float16
 
 
+def test_qwen3_vl_ideogram_text_feature_mode_matches_tapped_layers():
+    """Ideogram text-feature export path returns selected Qwen3-VL layer activations before final norm."""
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
+
+    from QEfficient.transformers.models.pytorch_transforms import CustomOpsTransform, KVCacheTransform
+
+    model = Qwen3VLModel(_tiny_qwen3_vl_config()).eval()
+    model, _ = CustomOpsTransform.apply(model)
+    model, _ = KVCacheTransform.apply(model)
+
+    input_ids = torch.tensor([[0, 0, 11, 12, 13, 14]], dtype=torch.long)
+    attention_mask = torch.tensor([[0, 0, 1, 1, 1, 1]], dtype=torch.long)
+    text_position_ids = torch.tensor([[0, 0, 0, 1, 2, 3]], dtype=torch.long)
+    position_ids = text_position_ids[None, ...].expand(4, 1, -1)
+    activation_layers = (0,)
+
+    captured = []
+
+    def capture_layer_output(_module, _inputs, output):
+        captured.append(output[0].detach().clone())
+
+    handles = [
+        model.language_model.layers[layer_idx].register_forward_hook(capture_layer_output)
+        for layer_idx in activation_layers
+    ]
+    try:
+        with torch.no_grad():
+            model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, use_cache=False)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    expected = torch.stack(captured, dim=0).permute(1, 2, 3, 0).reshape(1, input_ids.shape[1], -1)
+    with torch.no_grad():
+        actual = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            use_cache=False,
+            return_ideogram_text_features=True,
+            ideogram_activation_layers=activation_layers,
+        )
+
+    assert actual.shape == expected.shape
+    assert torch.isfinite(actual).all()
+    assert torch.allclose(actual, expected, atol=1e-5, rtol=1e-5)
+
+
+def test_qwen3_vl_cached_decode_masks_only_active_query_tokens():
+    """Qwen3-VL cached decoding must keep the 4D mask query axis at the active token length."""
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
+
+    from QEfficient.transformers.models.pytorch_transforms import CustomOpsTransform, KVCacheTransform
+
+    model = Qwen3VLModel(_tiny_qwen3_vl_config()).eval()
+    model, _ = CustomOpsTransform.apply(model)
+    model, _ = KVCacheTransform.apply(model)
+
+    prompt_input_ids = torch.tensor([[0, 0, 11, 12, 13, 14]], dtype=torch.long)
+    prompt_attention_mask = torch.tensor([[0, 0, 1, 1, 1, 1]], dtype=torch.long)
+    prompt_position_ids = torch.tensor([[0, 0, 0, 1, 2, 3]], dtype=torch.long)[None, ...].expand(4, 1, -1)
+
+    with torch.no_grad():
+        prompt_outputs = model(
+            input_ids=prompt_input_ids,
+            attention_mask=prompt_attention_mask,
+            position_ids=prompt_position_ids,
+            use_cache=True,
+        )
+
+        decode_outputs = model(
+            input_ids=torch.tensor([[15]], dtype=torch.long),
+            attention_mask=torch.tensor([[0, 0, 1, 1, 1, 1, 1]], dtype=torch.long),
+            position_ids=torch.tensor([[[4]], [[4]], [[4]], [[4]]], dtype=torch.long),
+            past_key_values=prompt_outputs.past_key_values,
+            use_cache=True,
+        )
+
+    assert decode_outputs.last_hidden_state.shape[:2] == (1, 1)
+    assert torch.isfinite(decode_outputs.last_hidden_state).all()
+
+
 def test_qwen3_5_moe_get_submodules_for_export_keeps_decoder_layer_for_mixed_layer_types():
     """Mixed full/linear attention configs must still expose decoder layer subfunctions."""
     from types import SimpleNamespace

@@ -14,6 +14,7 @@ from QEfficient.base.modeling_qeff import QEFFBaseModel
 from QEfficient.base.onnx_transforms import FP16ClipTransform, SplitTensorsTransform
 from QEfficient.diffusers.models.pytorch_transforms import (
     AttentionTransform,
+    Bnb4BitLinearToLinearTransform,
     CLIPTextTransform,
     CustomOpsTransform,
     NormalizationTransform,
@@ -38,7 +39,7 @@ class QEffTextEncoder(QEFFBaseModel):
         _onnx_transforms (List): ONNX transformations applied after export
     """
 
-    _pytorch_transforms = [CLIPTextTransform, CustomOpsTransform, T5ModelTransform]
+    _pytorch_transforms = [Bnb4BitLinearToLinearTransform, CLIPTextTransform, CustomOpsTransform, T5ModelTransform]    
     _onnx_transforms = [FP16ClipTransform, SplitTensorsTransform]
 
     @property
@@ -147,7 +148,7 @@ class QEffUNet(QEFFBaseModel):
         _onnx_transforms (List): ONNX transformations applied after export
     """
 
-    _pytorch_transforms = [CustomOpsTransform]
+    _pytorch_transforms = [Bnb4BitLinearToLinearTransform, CustomOpsTransform]   
     _onnx_transforms = [FP16ClipTransform, SplitTensorsTransform]
 
     @property
@@ -225,7 +226,7 @@ class QEffVAE(QEFFBaseModel):
         _onnx_transforms (List): ONNX transformations applied after export
     """
 
-    _pytorch_transforms = [CustomOpsTransform, AttentionTransform]
+    _pytorch_transforms = [Bnb4BitLinearToLinearTransform, CustomOpsTransform, AttentionTransform]    
     _onnx_transforms = [FP16ClipTransform, SplitTensorsTransform]
 
     @property
@@ -412,7 +413,7 @@ class QEffFluxTransformerModel(QEFFBaseModel):
         _onnx_transforms (List): ONNX transformations applied after export
     """
 
-    _pytorch_transforms = [AttentionTransform, NormalizationTransform, CustomOpsTransform]
+    _pytorch_transforms = [Bnb4BitLinearToLinearTransform, AttentionTransform, NormalizationTransform, CustomOpsTransform]    
     _onnx_transforms = [FP16ClipTransform, SplitTensorsTransform]
 
     @property
@@ -554,7 +555,7 @@ class QEffWanTransformer(QEFFBaseModel):
     transformers are exported/compiled/executed as separate modules.
     """
 
-    _pytorch_transforms = [AttentionTransform, CustomOpsTransform, NormalizationTransform]
+    _pytorch_transforms = [Bnb4BitLinearToLinearTransform, AttentionTransform, CustomOpsTransform, NormalizationTransform]    
     _onnx_transforms = [FP16ClipTransform, SplitTensorsTransform]
 
     def __init__(self, transformer, module_name: str = "transformer"):
@@ -650,7 +651,7 @@ class QEffWanUnifiedTransformer(QEFFBaseModel):
         _onnx_transforms (List): ONNX transformations applied after export
     """
 
-    _pytorch_transforms = [AttentionTransform, CustomOpsTransform, NormalizationTransform]
+    _pytorch_transforms = [Bnb4BitLinearToLinearTransform, AttentionTransform, CustomOpsTransform, NormalizationTransform]    
     _onnx_transforms = [FP16ClipTransform, SplitTensorsTransform]
 
     def __init__(self, unified_transformer):

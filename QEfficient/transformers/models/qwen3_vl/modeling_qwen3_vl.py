@@ -429,6 +429,8 @@ class QEffQwen3VLTextAttention(Qwen3VLTextAttention):
                 batch_index=batch_index,
                 position_ids=position_ids[0],
             )
+            if attention_mask is not None and attention_mask.shape[-1] != key_states.shape[-2]:
+                attention_mask = attention_mask[..., : key_states.shape[-2]]
             attn_output, attn_weights = eager_attention_forward(
                 self,
                 query_states,
@@ -546,11 +548,15 @@ class QEffQwen3VLTextModel(Qwen3VLTextModel):
         visual_pos_masks: Optional[torch.Tensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
         deepstack_visual_embeds: Optional[list[torch.Tensor]] = None,
+        return_ideogram_text_features: bool = False,
+        ideogram_activation_layers: Optional[Tuple[int, ...]] = None,
         **kwargs,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
-        if self.config.use_cache and not isinstance(past_key_values, Cache):
+        return_legacy_cache = False
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+        if use_cache and not isinstance(past_key_values, Cache):
             return_legacy_cache = True
             past_key_values = QEffDynamicCache.from_legacy_cache(past_key_values)
 
@@ -562,25 +568,53 @@ class QEffQwen3VLTextModel(Qwen3VLTextModel):
                 past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
             )
 
-        # the hard coded `3` is for temporal, height and width.
+        # Standard Qwen3-VL uses three MRoPE axes (temporal, height, width). Ideogram can pass a
+        # fourth leading axis that carries left-padding-aware text positions for causal masking.
         if position_ids is None:
             position_ids = cache_position.view(1, 1, -1).expand(3, inputs_embeds.shape[0], -1)
         elif position_ids.dim() == 2:
             position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
 
-        target_length = attention_mask.shape[-1] if isinstance(attention_mask, torch.Tensor) else past_seen_tokens
-        causal_mask = _create_causal_mask(
-            position_ids=position_ids[0], target_length=target_length, sliding_window=None
+        if position_ids.shape[-1] != inputs_embeds.shape[1]:
+            position_ids = position_ids[..., -inputs_embeds.shape[1] :]
+
+        if position_ids.dim() == 3 and position_ids.shape[0] == 4:
+            text_position_ids = position_ids[0]
+            mrope_position_ids = position_ids[1:]
+        else:
+            text_position_ids = position_ids[0]
+            mrope_position_ids = position_ids
+
+        target_length = (
+            attention_mask.shape[-1] if isinstance(attention_mask, torch.Tensor) else text_position_ids.shape[-1]
         )
+        if isinstance(attention_mask, torch.Tensor) and attention_mask.dim() == 2:
+            if target_length == text_position_ids.shape[-1]:
+                query_indices = torch.arange(text_position_ids.shape[-1], device=text_position_ids.device).view(
+                    1, -1, 1
+                )
+                key_indices = torch.arange(target_length, device=text_position_ids.device).view(1, 1, -1)
+                causal_mask = (key_indices > query_indices).unsqueeze(1)
+            else:
+                causal_mask = _create_causal_mask(
+                    position_ids=text_position_ids, target_length=target_length, sliding_window=None
+                )
+            causal_mask = causal_mask | (attention_mask[:, None, None, :target_length] == 0)
+            causal_mask = causal_mask & (attention_mask[:, None, -text_position_ids.shape[-1] :, None] != 0)
+        else:
+            causal_mask = _create_causal_mask(
+                position_ids=text_position_ids, target_length=target_length, sliding_window=None
+            )
 
         hidden_states = inputs_embeds
-        position_embeddings = self.rotary_emb(hidden_states, position_ids[1:])
         cos, sin = qeff_prepare_mrope_cos_sin(
-            self.cos_cached, self.sin_cached, position_ids[1:], self.config.rope_scaling["mrope_section"]
+            self.cos_cached, self.sin_cached, mrope_position_ids, self.config.rope_scaling["mrope_section"]
         )
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
+        ideogram_hidden_states = []
+        ideogram_activation_set = set(ideogram_activation_layers or ())
 
         layer_idx = 0
         for decoder_layer in self.layers:
@@ -597,13 +631,15 @@ class QEffQwen3VLTextModel(Qwen3VLTextModel):
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
-                position_embeddings=position_embeddings,
+                position_embeddings=None,
                 sin_cached=sin,
                 cos_cached=cos,
                 **kwargs,
             )
 
             hidden_states = layer_outputs[0]
+            if return_ideogram_text_features and layer_idx in ideogram_activation_set:
+                ideogram_hidden_states.append(hidden_states)
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
@@ -615,6 +651,11 @@ class QEffQwen3VLTextModel(Qwen3VLTextModel):
                     deepstack_visual_embeds[layer_idx],
                 )
             layer_idx += 1
+
+        if return_ideogram_text_features:
+            return torch.stack(ideogram_hidden_states, dim=0).permute(1, 2, 3, 0).reshape(
+                inputs_embeds.shape[0], inputs_embeds.shape[1], -1
+            )
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
@@ -760,6 +801,13 @@ class QEffQwen3VLModel(Qwen3VLModel):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
+        return_ideogram_text_features = kwargs.pop("return_ideogram_text_features", False) or getattr(
+            self, "qeff_return_ideogram_text_features", False
+        )
+        ideogram_activation_layers = kwargs.pop("ideogram_activation_layers", None)
+        if ideogram_activation_layers is None:
+            ideogram_activation_layers = getattr(self, "qeff_ideogram_activation_layers", None)
+
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -782,8 +830,13 @@ class QEffQwen3VLModel(Qwen3VLModel):
             output_hidden_states=output_hidden_states,
             return_dict=True,
             cache_position=cache_position,
+            return_ideogram_text_features=return_ideogram_text_features,
+            ideogram_activation_layers=ideogram_activation_layers,
             **kwargs,
         )
+
+        if return_ideogram_text_features:
+            return outputs
 
         output = Qwen3VLModelOutputWithPast(
             last_hidden_state=outputs.last_hidden_state,

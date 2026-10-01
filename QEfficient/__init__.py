@@ -59,10 +59,16 @@ try:
     from QEfficient.diffusers.pipelines.flux.pipeline_flux import QEffFluxPipeline
     from QEfficient.diffusers.pipelines.wan.pipeline_wan import QEffWanPipeline
     from QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v import QEffWanImageToVideoPipeline
+    from QEfficient.diffusers.pipelines.ideogram.pipeline_ideogram import (
+        QEffIdeogram4Pipeline,
+        QEffIdeogram4PromptEnhancerHead,
+    )
 except Exception:
     QEffFluxPipeline = None
     QEffWanPipeline = None
     QEffWanImageToVideoPipeline = None
+    QEffIdeogram4Pipeline = None
+    QEffIdeogram4PromptEnhancerHead = None
 
 try:
     from QEfficient.peft import QEffAutoPeftModelForCausalLM
@@ -96,6 +102,10 @@ if QEffWanPipeline is not None:
     __all__.append("QEffWanPipeline")
 if QEffWanImageToVideoPipeline is not None:
     __all__.append("QEffWanImageToVideoPipeline")
+if QEffIdeogram4Pipeline is not None:
+    __all__.append("QEffIdeogram4Pipeline")
+if QEffIdeogram4PromptEnhancerHead is not None:
+    __all__.append("QEffIdeogram4PromptEnhancerHead")
 
 
 # Conditionally import QAIC-related modules if the SDK is installed

@@ -27,6 +27,7 @@ All tests run on CPU only. No QAIC hardware required. No network downloads.
 """
 
 import os
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -45,6 +46,19 @@ def _standard_attention(q, k, v, attention_mask=None):
         scores = scores + attention_mask
     weights = F.softmax(scores, dim=-1)
     return torch.matmul(weights, v)
+
+
+def _standard_attention_with_allowed_mask(q, k, v, attention_mask):
+    """Reference attention for boolean masks where True means the token pair is allowed."""
+    scale = q.shape[-1] ** -0.5
+    scores = torch.matmul(q, k.transpose(-2, -1)) * scale
+    scores = torch.where(attention_mask, scores, torch.tensor(-1e4, dtype=scores.dtype, device=scores.device))
+    weights = F.softmax(scores, dim=-1)
+    return torch.matmul(weights, v)
+
+
+def _make_segment_attention_mask(segment_ids):
+    return (segment_ids.unsqueeze(2) == segment_ids.unsqueeze(1)).unsqueeze(1)
 
 
 def _make_qkv(bs=1, nh=2, cl=8, dh=16):
@@ -123,6 +137,16 @@ class TestDiffusersModuleImportability:
         from QEfficient.diffusers.pipelines.pipeline_utils import QEffPipelineOutput
 
         assert QEffPipelineOutput is not None
+
+    def test_qeff_ideogram_prompt_enhancer_head_importable(self):
+        from QEfficient import QEffIdeogram4PromptEnhancerHead
+
+        assert QEffIdeogram4PromptEnhancerHead is not None
+
+    def test_qeff_ideogram_pipeline_importable(self):
+        from QEfficient import QEffIdeogram4Pipeline
+
+        assert QEffIdeogram4Pipeline is not None
 
 
 # ---------------------------------------------------------------------------
@@ -471,13 +495,36 @@ class TestComputeBlockedAttention:
         from QEfficient.diffusers.models.modeling_utils import compute_blocked_attention
 
         q, k, v = _make_qkv(bs=1, nh=2, cl=8, dh=16)
-        # attention_mask must be boolean (True = masked/ignored position)
-        mask = torch.zeros(1, 1, 8, 8, dtype=torch.bool)
+        mask = torch.ones(1, 1, 8, 8, dtype=torch.bool)
         out = compute_blocked_attention(
             q, k, v, head_block_size=2, num_kv_blocks=2, num_q_blocks=2, blocking_mode="head", attention_mask=mask
         )
         assert out.shape == q.shape
         assert torch.isfinite(out).all()
+
+    def test_allowed_attention_mask_all_modes_agree(self):
+        """Blocked self-attention must apply boolean masks without using the cross-attention fallback."""
+        from QEfficient.diffusers.models.modeling_utils import compute_blocked_attention
+
+        q, k, v = _make_qkv(bs=2, nh=4, cl=9, dh=8)
+        segment_ids = torch.tensor([[0, 0, 1, 1, 1, 2, 2, 2, 2], [0, 0, 0, 3, 3, 3, 4, 4, 4]])
+        attention_mask = _make_segment_attention_mask(segment_ids)
+        ref = _standard_attention_with_allowed_mask(q, k, v, attention_mask)
+
+        for mode in ["head", "kv", "q", "qkv"]:
+            out = compute_blocked_attention(
+                q,
+                k,
+                v,
+                head_block_size=2,
+                num_kv_blocks=3,
+                num_q_blocks=3,
+                blocking_mode=mode,
+                attention_mask=attention_mask,
+                is_cross_attention=False,
+            )
+            max_diff = (ref - out).abs().max().item()
+            assert max_diff < 1e-4, f"Mode '{mode}' masked attention max_diff={max_diff:.2e}"
 
 
 # ---------------------------------------------------------------------------
@@ -841,6 +888,64 @@ class TestPipelineUtils:
         assert hasattr(output, "images")
         assert output.images is images
 
+    def test_set_execute_params_uses_default_data_path_timeout(self):
+        from QEfficient.diffusers.pipelines.pipeline_utils import set_execute_params
+
+        module = SimpleNamespace()
+        pipeline = SimpleNamespace(
+            custom_config={"modules": {"module": {"execute": {"device_ids": [0], "qpc_path": None}}}},
+            modules={"module": module},
+        )
+
+        set_execute_params(pipeline)
+
+        assert module.device_ids == [0]
+        assert module.qpc_path is None
+        assert module.data_path_timeout_ms == 60_000
+
+    def test_set_execute_params_reads_data_path_timeout(self):
+        from QEfficient.diffusers.pipelines.pipeline_utils import set_execute_params
+
+        module = SimpleNamespace()
+        pipeline = SimpleNamespace(
+            custom_config={
+                "modules": {
+                    "module": {
+                        "execute": {
+                            "device_ids": None,
+                            "qpc_path": None,
+                            "data_path_timeout_ms": 300_000,
+                        }
+                    }
+                }
+            },
+            modules={"module": module},
+        )
+
+        set_execute_params(pipeline)
+
+        assert module.data_path_timeout_ms == 300_000
+
+    def test_set_execute_params_infers_device_ids_from_mdp_config(self):
+        from QEfficient.diffusers.pipelines.pipeline_utils import set_execute_params
+
+        module = SimpleNamespace()
+        pipeline = SimpleNamespace(
+            custom_config={
+                "modules": {
+                    "module": {
+                        "compilation": {"mdp_ts_num_devices": 4},
+                        "execute": {"device_ids": None, "qpc_path": None},
+                    }
+                }
+            },
+            modules={"module": module},
+        )
+
+        set_execute_params(pipeline)
+
+        assert module.device_ids == [0, 1, 2, 3]
+
 
 # ---------------------------------------------------------------------------
 # 11. Pipeline module class structure
@@ -949,7 +1054,272 @@ class TestPipelineModuleStructure:
 
 
 # ---------------------------------------------------------------------------
-# 12. Flux transformer blocks (tiny in-memory)
+# 12. Ideogram prompt enhancer head (tiny in-memory)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.diffusers
+@pytest.mark.accuracy
+class TestIdeogramPromptEnhancerHead:
+    """QEff Ideogram prompt-enhancer head must preserve Diffusers head behavior on CPU."""
+
+    def test_qeff_prompt_enhancer_head_forward_matches_source(self):
+        try:
+            from diffusers import Ideogram4PromptEnhancerHead
+        except ImportError:
+            pytest.skip("Installed diffusers does not provide Ideogram4PromptEnhancerHead")
+
+        from QEfficient.diffusers.pipelines.ideogram.pipeline_ideogram import QEffIdeogram4PromptEnhancerHead
+
+        source = Ideogram4PromptEnhancerHead(hidden_size=8, vocab_size=16).eval()
+        qeff_head = QEffIdeogram4PromptEnhancerHead(source)
+        hidden_states = torch.randn(2, 3, 8)
+
+        with torch.no_grad():
+            expected = source(hidden_states)
+            actual = qeff_head.model(hidden_states)
+
+        assert actual.shape == (2, 3, 16)
+        assert torch.allclose(actual, expected)
+
+    def test_qeff_prompt_enhancer_head_onnx_params_use_head_config(self):
+        try:
+            from diffusers import Ideogram4PromptEnhancerHead
+        except ImportError:
+            pytest.skip("Installed diffusers does not provide Ideogram4PromptEnhancerHead")
+
+        from QEfficient.diffusers.pipelines.ideogram.pipeline_ideogram import QEffIdeogram4PromptEnhancerHead
+
+        qeff_head = QEffIdeogram4PromptEnhancerHead(
+            Ideogram4PromptEnhancerHead(hidden_size=8, vocab_size=16).eval()
+        )
+        inputs, dynamic_axes, output_names = qeff_head.get_onnx_params(batch_size=2, seq_len=4)
+
+        assert inputs["hidden_states"].shape == (2, 4, 8)
+        assert dynamic_axes["hidden_states"] == {0: "batch_size", 1: "seq_len"}
+        assert dynamic_axes["logits"] == {0: "batch_size", 1: "seq_len"}
+        assert output_names == ["logits"]
+
+
+@pytest.mark.diffusers
+class TestIdeogramTextEncoder:
+    """QEff Ideogram text-encoder wrapper exposes fixed Qwen3-VL ONNX inputs."""
+
+    def test_qeff_text_encoder_onnx_params_use_four_axis_position_ids(self):
+        from QEfficient.diffusers.pipelines.ideogram.pipeline_ideogram import QEffIdeogram4TextEncoder
+
+        qeff_text_encoder = QEffIdeogram4TextEncoder.__new__(QEffIdeogram4TextEncoder)
+        inputs, dynamic_axes, output_names = qeff_text_encoder.get_onnx_params(batch_size=2, seq_len=4)
+
+        assert inputs["input_ids"].shape == (2, 4)
+        assert inputs["attention_mask"].shape == (2, 4)
+        assert inputs["position_ids"].shape == (4, 2, 4)
+        assert dynamic_axes["position_ids"] == {1: "batch_size", 2: "seq_len"}
+        assert output_names == ["text_features"]
+
+    def test_qeff_text_feature_extractor_projects_conditioning_once(self):
+        from QEfficient.diffusers.pipelines.ideogram.pipeline_ideogram import _IdeogramQwenTextFeatureExtractor
+
+        class FakeTextEncoder(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.language_model = SimpleNamespace(layers=[object(), object()])
+                self.config = SimpleNamespace(text_config=SimpleNamespace(hidden_size=4))
+
+            def forward(self, input_ids, attention_mask, position_ids, **kwargs):
+                return torch.arange(input_ids.numel() * 8, dtype=torch.float32).view(input_ids.shape[0], -1, 8)
+
+        conditioning_transformer = SimpleNamespace(
+            llm_cond_norm=torch.nn.Identity(),
+            llm_cond_proj=torch.nn.Linear(8, 3, bias=False),
+        )
+        extractor = _IdeogramQwenTextFeatureExtractor(
+            FakeTextEncoder(),
+            activation_layers=(0, 1),
+            conditioning_transformer=conditioning_transformer,
+        )
+        input_ids = torch.ones(1, 4, dtype=torch.long)
+        attention_mask = torch.tensor([[0, 1, 1, 1]], dtype=torch.long)
+        position_ids = torch.zeros(4, 1, 4, dtype=torch.long)
+
+        with torch.no_grad():
+            output = extractor(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids)
+
+        assert extractor.output_features_dim == 3
+        assert output.shape == (1, 4, 3)
+        assert torch.count_nonzero(output[:, :1]) == 0
+
+
+def _make_tiny_ideogram_transformer():
+    try:
+        from diffusers.models.transformers.transformer_ideogram4 import Ideogram4Transformer2DModel
+
+        from QEfficient.diffusers.models.pytorch_transforms import AttentionTransform, NormalizationTransform
+
+        model = Ideogram4Transformer2DModel(
+            in_channels=4,
+            num_layers=1,
+            attention_head_dim=4,
+            num_attention_heads=2,
+            intermediate_size=16,
+            adaln_dim=8,
+            llm_features_dim=12,
+            mrope_section=(1, 1, 0),
+        ).eval()
+        model, _ = AttentionTransform.apply(model)
+        model, _ = NormalizationTransform.apply(model)
+        return model
+    except Exception:
+        return None
+
+
+@pytest.mark.diffusers
+@pytest.mark.accuracy
+class TestIdeogramTransformer:
+    def test_qeff_ideogram_defaults_to_qkv_blocking_for_large_unmasked_attention(self, monkeypatch):
+        from QEfficient.diffusers.models.transformers.transformer_ideogram import (
+            _get_ideogram_attention_blocking_config,
+        )
+
+        monkeypatch.delenv("ATTENTION_BLOCKING_MODE", raising=False)
+
+        blocking_mode, head_block_size, num_kv_blocks, num_q_blocks = _get_ideogram_attention_blocking_config(
+            seq_len=4096,
+            num_heads=18,
+            has_attention_mask=False,
+        )
+
+        assert blocking_mode == "qkv"
+        assert head_block_size == 18
+        assert num_kv_blocks == 16
+        assert num_q_blocks == 4
+
+    def test_qeff_ideogram_defaults_to_qkv_blocking_for_large_masked_attention(self, monkeypatch):
+        from QEfficient.diffusers.models.transformers.transformer_ideogram import (
+            _get_ideogram_attention_blocking_config,
+        )
+
+        monkeypatch.delenv("ATTENTION_BLOCKING_MODE", raising=False)
+
+        blocking_mode, head_block_size, num_kv_blocks, num_q_blocks = _get_ideogram_attention_blocking_config(
+            seq_len=4608,
+            num_heads=18,
+            has_attention_mask=True,
+        )
+
+        assert blocking_mode == "qkv"
+        assert head_block_size == 18
+        assert num_kv_blocks == 18
+        assert num_q_blocks == 5
+
+    def test_qeff_transformer_onnx_params_omit_segment_ids_when_unmasked(self):
+        from QEfficient.diffusers.pipelines.ideogram.pipeline_ideogram import QEffIdeogram4TransformerModel
+
+        model = _make_tiny_ideogram_transformer()
+        if model is None:
+            pytest.skip("Could not instantiate tiny Ideogram4Transformer2DModel")
+
+        qeff_transformer = QEffIdeogram4TransformerModel(model)
+        qeff_transformer.set_attention_mask_enabled(False)
+
+        inputs, dynamic_axes, _ = qeff_transformer.get_onnx_params(batch_size=1, seq_len=4)
+
+        assert "segment_ids" not in inputs
+        assert "segment_ids" not in dynamic_axes
+
+    def test_qeff_preprojected_encoder_hidden_states_match_raw_path(self):
+        from diffusers.models.transformers.transformer_ideogram4 import LLM_TOKEN_INDICATOR, OUTPUT_IMAGE_INDICATOR
+
+        model = _make_tiny_ideogram_transformer()
+        if model is None:
+            pytest.skip("Could not instantiate tiny Ideogram4Transformer2DModel")
+
+        batch_size = 1
+        text_seq_len = 3
+        image_seq_len = 2
+        seq_len = text_seq_len + image_seq_len
+        hidden_states = torch.randn(batch_size, seq_len, 4)
+        timestep = torch.tensor([0.5])
+        rotary_emb_cos = torch.ones(batch_size, seq_len, 4)
+        rotary_emb_sin = torch.zeros(batch_size, seq_len, 4)
+        segment_ids = torch.ones(batch_size, seq_len, dtype=torch.long)
+        indicator = torch.tensor(
+            [[LLM_TOKEN_INDICATOR] * text_seq_len + [OUTPUT_IMAGE_INDICATOR] * image_seq_len], dtype=torch.long
+        )
+        encoder_hidden_states = torch.randn(batch_size, text_seq_len, 12)
+
+        with torch.no_grad():
+            model.qeff_encoder_hidden_states_projected = False
+            raw_output = model(
+                hidden_states=hidden_states,
+                timestep=timestep,
+                rotary_emb_cos=rotary_emb_cos,
+                rotary_emb_sin=rotary_emb_sin,
+                segment_ids=segment_ids,
+                indicator=indicator,
+                encoder_hidden_states=encoder_hidden_states,
+                return_dict=False,
+            )[0]
+            projected_encoder_hidden_states = model.qeff_project_encoder_hidden_states(
+                encoder_hidden_states,
+                indicator[:, :text_seq_len],
+            )
+            model.qeff_encoder_hidden_states_projected = True
+            projected_output = model(
+                hidden_states=hidden_states,
+                timestep=timestep,
+                rotary_emb_cos=rotary_emb_cos,
+                rotary_emb_sin=rotary_emb_sin,
+                segment_ids=segment_ids,
+                indicator=indicator,
+                encoder_hidden_states=projected_encoder_hidden_states,
+                return_dict=False,
+            )[0]
+
+        assert torch.allclose(projected_output, raw_output, atol=1e-5, rtol=1e-5)
+
+    def test_qeff_transformer_unmasked_path_matches_all_true_segment_mask(self):
+        from diffusers.models.transformers.transformer_ideogram4 import OUTPUT_IMAGE_INDICATOR
+
+        model = _make_tiny_ideogram_transformer()
+        if model is None:
+            pytest.skip("Could not instantiate tiny Ideogram4Transformer2DModel")
+
+        batch_size = 1
+        seq_len = 4
+        hidden_states = torch.randn(batch_size, seq_len, 4)
+        timestep = torch.tensor([0.5])
+        rotary_emb_cos = torch.ones(batch_size, seq_len, 4)
+        rotary_emb_sin = torch.zeros(batch_size, seq_len, 4)
+        segment_ids = torch.ones(batch_size, seq_len, dtype=torch.long)
+        indicator = torch.full((batch_size, seq_len), OUTPUT_IMAGE_INDICATOR, dtype=torch.long)
+
+        with torch.no_grad():
+            model.qeff_set_attention_mask_enabled(True)
+            masked_output = model(
+                hidden_states=hidden_states,
+                timestep=timestep,
+                rotary_emb_cos=rotary_emb_cos,
+                rotary_emb_sin=rotary_emb_sin,
+                segment_ids=segment_ids,
+                indicator=indicator,
+                return_dict=False,
+            )[0]
+            model.qeff_set_attention_mask_enabled(False)
+            unmasked_output = model(
+                hidden_states=hidden_states,
+                timestep=timestep,
+                rotary_emb_cos=rotary_emb_cos,
+                rotary_emb_sin=rotary_emb_sin,
+                indicator=indicator,
+                return_dict=False,
+            )[0]
+
+        assert torch.allclose(unmasked_output, masked_output, atol=1e-5, rtol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# 13. Flux transformer blocks (tiny in-memory)
 # ---------------------------------------------------------------------------
 
 

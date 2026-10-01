@@ -19,6 +19,7 @@ from QEfficient.utils._utils import load_json
 from QEfficient.utils.logging_utils import logger
 
 
+
 def calculate_compressed_latent_dimension(height: int, width: int, vae_scale_factor: int) -> int:
     """
     Calculate the compressed latent dimension.
@@ -115,15 +116,17 @@ def config_manager(cls, config_source: Optional[str] = None, use_onnx_subfunctio
 
 def set_execute_params(cls):
     """
-    Set device IDs, qpc_paths for each module based on the custom configuration.
+    Set runtime execution parameters for each module based on the custom configuration.
 
-    Iterates through all modules in the pipeline and assigns device IDs, qpc_paths
-    from the configuration file to each module's attribute.
+    Iterates through all modules in the pipeline and assigns device IDs, QPC paths,
+    and optional QAIC runtime properties from each module's ``execute`` section.
     """
     config_modules = cls.custom_config["modules"]
     for module_name, module_obj in cls.modules.items():
-        module_obj.device_ids = config_modules[module_name]["execute"]["device_ids"]
-        module_obj.qpc_path = config_modules[module_name]["execute"]["qpc_path"]
+        execute_config = config_modules[module_name]["execute"]
+        module_obj.device_ids = execute_config["device_ids"]
+        module_obj.qpc_path = execute_config["qpc_path"]
+        module_obj.data_path_timeout_ms = execute_config.get("data_path_timeout_ms", DEFAULT_DATA_PATH_TIMEOUT_MS)
         if module_obj.qpc_path:
             if not os.path.exists(module_obj.qpc_path):
                 raise FileNotFoundError(
@@ -324,4 +327,4 @@ class QEffPipelineOutput:
 
 # List of module name that require special handling during export
 # when use_onnx_subfunctions is enabled
-ONNX_SUBFUNCTION_MODULE = ["transformer", "transformer_high", "transformer_low"]
+ONNX_SUBFUNCTION_MODULE = ["transformer", "transformer_high", "transformer_low", "unconditional_transformer"]

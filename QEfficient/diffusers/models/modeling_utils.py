@@ -96,6 +96,12 @@ def apply_head_blocking(
 
             # Compute full attention matrix for this head block
             qkblock = torch.matmul(q_g, k_g.transpose(-2, -1)) * scale_factor
+            if attention_mask is not None:
+                qkblock = torch.where(
+                    attention_mask,
+                    qkblock,
+                    torch.tensor(-1e4, dtype=qkblock.dtype, device=qkblock.device),
+                )
 
             # Standard softmax computation
             probs = torch.softmax(qkblock, dim=-1)
@@ -187,6 +193,13 @@ def apply_kv_blocking(
 
                 # Compute attention scores for current KV block
                 qkblock = torch.matmul(q_g, k_block.transpose(-2, -1)) * scale_factor
+                if attention_mask is not None:
+                    mask_block = attention_mask[:, :, :, ki : ki + real_kv_len]
+                    qkblock = torch.where(
+                        mask_block,
+                        qkblock,
+                        torch.tensor(-1e4, dtype=qkblock.dtype, device=qkblock.device),
+                    )
 
                 # Online softmax: Update running maximum
                 prev_max = running_max.clone()
@@ -290,6 +303,13 @@ def apply_q_blocking(
 
                 # Compute attention for this query block against all keys
                 scores = torch.matmul(q_block, k_g.transpose(-2, -1)) * scale_factor
+                if attention_mask is not None:
+                    mask_block = attention_mask[:, :, qi : qi + real_q_len, :]
+                    scores = torch.where(
+                        mask_block,
+                        scores,
+                        torch.tensor(-1e4, dtype=scores.dtype, device=scores.device),
+                    )
                 probs = torch.softmax(scores, dim=-1)
                 out_block = torch.matmul(probs, v_g)
 
@@ -399,6 +419,13 @@ def apply_qkv_blocking(
 
                     # Compute attention scores for current Q-K block
                     qkblock = torch.matmul(q_block, k_block.transpose(-2, -1)) * scale_factor
+                    if attention_mask is not None:
+                        mask_block = attention_mask[:, :, qi : qi + real_q_len, ki : ki + real_kv_len]
+                        qkblock = torch.where(
+                            mask_block,
+                            qkblock,
+                            torch.tensor(-1e4, dtype=qkblock.dtype, device=qkblock.device),
+                        )
 
                     # Online softmax: Update running maximum
                     prev_max = running_max.clone()
