@@ -172,7 +172,6 @@ def _ensure_qaic_session(module: QEFFBaseModel) -> QAICInferenceSession:
         module.qpc_session = QAICInferenceSession(
             str(module.qpc_path),
             device_ids=module.device_ids,
-            data_path_timeout_ms=module.data_path_timeout_ms,
         )
     elif not getattr(module.qpc_session, "is_active", True):
         module.qpc_session.activate()

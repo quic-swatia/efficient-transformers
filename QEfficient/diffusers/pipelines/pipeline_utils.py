@@ -126,7 +126,6 @@ def set_execute_params(cls):
         execute_config = config_modules[module_name]["execute"]
         module_obj.device_ids = execute_config["device_ids"]
         module_obj.qpc_path = execute_config["qpc_path"]
-        module_obj.data_path_timeout_ms = execute_config.get("data_path_timeout_ms", DEFAULT_DATA_PATH_TIMEOUT_MS)
         if module_obj.qpc_path:
             if not os.path.exists(module_obj.qpc_path):
                 raise FileNotFoundError(
